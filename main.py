@@ -6,6 +6,7 @@ import os
 import signal
 import re
 
+from camera_manager import CameraManager, CameraUnknownSettingError, CameraReadError, CameraWriteError
 from commander import Commander, BusyError
 
 app = Flask(
@@ -16,15 +17,7 @@ app = Flask(
 
 # --- Global variable to hold the process ---
 commander = Commander()
-
-# --- Configuration Mapping ---
-# Maps simple names to the full gphoto2 config paths.
-CONFIG_MAP = {
-    'shutterspeed': '/main/capturesettings/shutterspeed',
-    'iso': '/main/imgsettings/iso',
-    'f-number': '/main/capturesettings/f-number'
-}
-
+camera = CameraManager(commander=commander)
 
 @app.route('/', defaults={'path': 'index.html'})
 @app.route('/<path:path>')
@@ -33,60 +26,37 @@ def index(path):
     return send_from_directory('static', path)
 
 
+@app.route("/api/reload-camera", methods=['GET', 'POST'])
+def reload_camera():
+    """Reload camera settings"""
+    camera.reload_camera()
+
 @app.route('/api/config/<config_name>', methods=['GET', 'POST'])
 def api_config(config_name):
     """Generic endpoint to get or set a camera configuration value."""
-    if config_name not in CONFIG_MAP:
-        return jsonify({'error': f'Unknown config name: {config_name}'}), 404
-
-    config_path = CONFIG_MAP[config_name]
-
-    if request.method == 'GET':
-        try:
-            commander.execute_command(
-                ["gphoto2", f"--get-config={config_path}"],
-                startup_timeout=10,
-                timeout=20
-            )
-        except BusyError:
-            return jsonify({'error': f'timeout trying to run gphoto2 for {config_name}.'}), 500
-        stdout, stderr, _ = commander.wait_for_outputs(timeout=20)
-
-        if stderr and "error" in stderr.lower():
-            return jsonify({'error': stderr.strip()}), 500
-
-        try:
-            current_match = re.search(r"Current:\s*(.*)", stdout)
-            current = current_match.group(1).strip() if current_match else None
-
-            choices_matches = re.findall(r"Choice:\s*\d+\s*(.*)", stdout)
-            choices = [{"value": m.strip()} for m in choices_matches]
-
-            if not choices:
-                return jsonify({'error': f'Could not parse choices for {config_name}.'}), 500
-
+    try:
+        if request.method == 'GET':
+            current, choices = camera.read_setting(config_name)
             return jsonify({'current': current, 'choices': choices})
-        except Exception as e:
-            return jsonify({'error': f"Failed to parse gphoto2 output: {e}"}), 500
 
-    if request.method == 'POST':
-        data = request.json
-        value_to_set = data.get('value')
-        if value_to_set is None:
-            return jsonify({'status': 'error', 'message': 'No value provided'}), 400
+        if request.method == 'POST':
+            data = request.json
+            value_to_set = data.get('value')
+            camera.apply_setting(setting=config_name, value=value_to_set)
+            if value_to_set is None:
+                return jsonify({'status': 'error', 'message': 'No value provided'}), 400
+            return jsonify({'status': 'success', 'message': f'{config_name} set to {value_to_set}'})
 
-        commander.execute_command(
-            ["gphoto2", f"--set-config-value={config_path}={value_to_set}"],
-            startup_timeout=10,
-            timeout=20
-        )
-        stdout, stderr, _ = commander.wait_for_outputs(timeout=20)
-
-        if stderr and "error" in stderr.lower():
-            return jsonify({'status': 'error', 'message': stderr.strip()}), 500
-
-        return jsonify({'status': 'success', 'message': f'{config_name} set to {value_to_set}'})
-
+    except CameraUnknownSettingError:
+        return jsonify({'error': f'Unknown config name: {config_name}'}), 404
+    except CameraReadError as e:
+        return jsonify({'error': f'Could not parse choices for {config_name}: {e}'}), 500
+    except CameraWriteError as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    except BusyError:
+        return jsonify({'error': f'timeout trying to run gphoto2 for {config_name}.'}), 500
+    except Exception as e:
+        return jsonify({'error': f"unknown error: {e}"}), 500
 
 @app.route('/start_capture', methods=['POST'])
 def start_capture():
@@ -98,20 +68,14 @@ def start_capture():
     capture_dir = os.path.join(os.path.expanduser("~"), "astro_captures", capture_type)
     os.makedirs(capture_dir, exist_ok=True)
 
-    env = os.environ.copy()
-    env['LANG'] = 'C.UTF-8'
-
     cmd = ["gphoto2"]
     timeout = 10
 
 
-    exposure = int(data.get('exposure'))
     count = int(data.get('count'))
-    if not exposure or not count:
-        return jsonify({'status': 'error', 'message': 'Exposure and count are required.'}), 400
 
     filename_template = f"{capture_type}_%Y%m%d_%H%M%S.%C"
-
+    exposure = int(camera.read_setting("shutterspeed")[0])
     if capture_type in ['lights', 'darks']:
         cmd.extend(["-B", str(exposure)])
         timeout = (exposure + 2) * count + 10
@@ -130,7 +94,7 @@ def start_capture():
         commander.execute_command(cmd,timeout=timeout, startup_timeout=10)
         return jsonify({'status': 'started', 'message': f'Started {capture_type} capture. Command: {" ".join(cmd)}'})
     except BusyError:
-        return jsonify({'status': 'error', 'message': 'A capture is already in progress.'}), 400
+        return jsonify({'status': 'error', 'message': 'A task is already in progress.'}), 400
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'Failed to start gphoto2: {e}'}), 500
 
