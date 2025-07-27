@@ -1,13 +1,21 @@
-from flask import Flask, render_template_string, request, jsonify
+import time
+
+from flask import Flask, render_template_string, request, jsonify, send_from_directory
 import subprocess
 import os
 import signal
 import re
 
-app = Flask(__name__)
+from commander import Commander, BusyError
+
+app = Flask(
+    __name__,
+    static_url_path='',
+    static_folder='static'
+)
 
 # --- Global variable to hold the process ---
-capture_process = None
+commander = Commander()
 
 # --- Configuration Mapping ---
 # Maps simple names to the full gphoto2 config paths.
@@ -18,262 +26,11 @@ CONFIG_MAP = {
 }
 
 
-# --- Helper function for running gphoto2 commands ---
-def run_gphoto_command(cmd):
-    """Runs a gphoto2 command with a specific LANG environment variable for consistent output."""
-    env = os.environ.copy()
-    env['LANG'] = 'C.UTF-8'
-    try:
-        # Using a timeout to prevent the command from hanging indefinitely
-        process = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-            env=env,
-            timeout=10
-        )
-        return process.stdout, process.stderr
-    except subprocess.CalledProcessError as e:
-        return e.stdout, e.stderr
-    except subprocess.TimeoutExpired:
-        return None, "gphoto2 command timed out. Is the camera connected and responsive?"
-    except FileNotFoundError:
-        return None, "gphoto2 command not found. Is it installed and in your PATH?"
-
-
-# --- HTML & JavaScript Frontend ---
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale-1.0">
-    <title>AstroPi Control</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        body { font-family: 'Inter', sans-serif; }
-        .card { background-color: #1f2937; color: #f3f4f6; }
-        .btn-primary { background-color: #3b82f6; transition: background-color 0.3s; }
-        .btn-primary:hover { background-color: #2563eb; }
-        .btn-danger { background-color: #ef4444; transition: background-color: 0.3s; }
-        .btn-danger:hover { background-color: #dc2626; }
-        .input-field, .select-field { background-color: #374151; border-color: #4b5563; }
-        #status-log { background-color: #111827; font-family: 'monospace'; height: 200px; overflow-y: scroll; border: 1px solid #4b5563; }
-    </style>
-</head>
-<body class="bg-gray-900 text-white p-4 md:p-8">
-    <div class="max-w-4xl mx-auto">
-        <header class="text-center mb-8">
-            <h1 class="text-4xl font-bold text-blue-400">AstroPi Camera Control</h1>
-            <p class="text-gray-400">Control your astrophotography captures from your browser.</p>
-        </header>
-
-        <!-- Global Settings -->
-        <div class="card p-6 rounded-lg shadow-lg mb-6">
-            <h2 class="text-2xl font-semibold mb-4 text-cyan-400">Camera Settings</h2>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
-                <div>
-                    <label for="iso-select" class="block mb-1 text-sm font-medium">ISO</label>
-                    <select id="iso-select" data-config="iso" class="w-full p-2 rounded select-field camera-config-select">
-                        <option>Loading...</option>
-                    </select>
-                </div>
-                <div>
-                    <label for="f-number-select" class="block mb-1 text-sm font-medium">Aperture (F-Number)</label>
-                    <select id="f-number-select" data-config="f-number" class="w-full p-2 rounded select-field camera-config-select">
-                        <option>Loading...</option>
-                    </select>
-                </div>
-                <div>
-                    <label for="shutter-speed-select" class="block mb-1 text-sm font-medium">Shutter Speed</label>
-                    <select id="shutter-speed-select" data-config="shutterspeed" class="w-full p-2 rounded select-field camera-config-select">
-                        <option>Loading...</option>
-                    </select>
-                </div>
-            </div>
-            <div id="bulb-input-container" class="hidden mt-4">
-                <label for="bulb-duration" class="block mb-1 text-sm font-medium">Bulb Duration (s)</label>
-                <input type="number" id="bulb-duration" value="60" class="w-full p-2 rounded input-field">
-            </div>
-        </div>
-
-        <div id="controls" class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <!-- Lights, Darks, Offsets Cards -->
-            <div class="card p-6 rounded-lg shadow-lg"><h2 class="text-2xl font-semibold mb-4 text-yellow-400">Lights</h2><form id="lights-form" class="space-y-4"><div><label for="lights-count" class="block mb-1 text-sm font-medium">Number of Shots</label><input type="number" id="lights-count" value="10" class="w-full p-2 rounded input-field"></div><button type="submit" class="w-full btn-primary text-white font-bold py-2 px-4 rounded">Start Lights</button></form></div>
-            <div class="card p-6 rounded-lg shadow-lg"><h2 class="text-2xl font-semibold mb-4 text-purple-400">Darks</h2><form id="darks-form" class="space-y-4"><div><label for="darks-count" class="block mb-1 text-sm font-medium">Number of Shots</label><input type="number" id="darks-count" value="10" class="w-full p-2 rounded input-field"></div><button type="submit" class="w-full btn-primary text-white font-bold py-2 px-4 rounded">Start Darks</button></form></div>
-            <div class="card p-6 rounded-lg shadow-lg"><h2 class="text-2xl font-semibold mb-4 text-green-400">Offsets/Bias</h2><form id="offsets-form" class="space-y-4"><div><label for="offsets-count" class="block mb-1 text-sm font-medium">Number of Shots</label><input type="number" id="offsets-count" value="20" class="w-full p-2 rounded input-field"></div><button type="submit" class="w-full btn-primary text-white font-bold py-2 px-4 rounded">Start Offsets</button></form></div>
-        </div>
-
-        <div class="mt-8">
-            <h2 class="text-2xl font-semibold mb-4">Capture Status</h2>
-            <div id="status-log" class="p-4 rounded-lg"><p>Initializing...</p></div>
-            <div id="status-current" class="mt-2 text-lg"></div>
-            <button id="stop-btn" class="w-full mt-4 btn-danger text-white font-bold py-2 px-4 rounded hidden">Stop Current Capture</button>
-        </div>
-    </div>
-
-    <script>
-        const log = document.getElementById('status-log');
-        const statusCurrent = document.getElementById('status-current');
-        const stopBtn = document.getElementById('stop-btn');
-        const bulbContainer = document.getElementById('bulb-input-container');
-        const bulbInput = document.getElementById('bulb-duration');
-
-        function addToLog(message) {
-            const p = document.createElement('p');
-            p.textContent = `> ${message}`;
-            log.appendChild(p);
-            log.scrollTop = log.scrollHeight;
-        }
-
-        async function fetchCameraConfig(selectElement) {
-            const configName = selectElement.dataset.config;
-            addToLog(`Fetching settings for ${configName}...`);
-            try {
-                const response = await fetch(`/api/config/${configName}`);
-                const data = await response.json();
-                if (data.error) {
-                    addToLog(`Error for ${configName}: ${data.error}`);
-                    selectElement.innerHTML = `<option>${data.error}</option>`;
-                    return;
-                }
-
-                selectElement.innerHTML = ''; // Clear loading message
-                data.choices.forEach(choice => {
-                    const option = document.createElement('option');
-                    option.value = choice.value;
-                    option.textContent = choice.value;
-                    selectElement.appendChild(option);
-                });
-
-                selectElement.value = data.current;
-                addToLog(`Loaded ${configName}. Current: ${data.current}`);
-
-                // Special handling for shutter speed bulb mode
-                if (configName === 'shutterspeed') {
-                    handleShutterChange();
-                }
-
-            } catch (error) {
-                addToLog(`Failed to fetch ${configName} settings: ${error}`);
-                selectElement.innerHTML = `<option>Error loading</option>`;
-            }
-        }
-
-        async function setCameraConfig(configName, value) {
-            addToLog(`Setting ${configName} to: ${value}`);
-            try {
-                const response = await fetch(`/api/config/${configName}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ value: value })
-                });
-                const data = await response.json();
-                if (data.status !== 'success') {
-                    addToLog(`Failed to set ${configName}: ${data.message}`);
-                }
-            } catch (error) {
-                addToLog(`Error setting ${configName}: ${error}`);
-            }
-        }
-
-        function handleShutterChange() {
-            const shutterSelect = document.getElementById('shutter-speed-select');
-            if (shutterSelect.value.toLowerCase() === 'bulb') {
-                bulbContainer.classList.remove('hidden');
-            } else {
-                bulbContainer.classList.add('hidden');
-            }
-        }
-
-        function getExposureValue() {
-            const shutterSelect = document.getElementById('shutter-speed-select');
-            const selectedValue = shutterSelect.value;
-            if (selectedValue.toLowerCase() === 'bulb') {
-                return bulbInput.value;
-            }
-            try {
-                // Handles fractions like "1/100"
-                return eval(selectedValue);
-            } catch {
-                return selectedValue;
-            }
-        }
-
-        async function submitCapture(type, params) {
-            addToLog(`Starting ${type} capture...`);
-            stopBtn.classList.remove('hidden');
-            try {
-                const response = await fetch('/start_capture', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type, ...params })
-                });
-                const data = await response.json();
-                if (data.status === 'error') {
-                     addToLog(`Error: ${data.message}`);
-                     stopBtn.classList.add('hidden');
-                } else {
-                     addToLog(data.message);
-                     checkStatus();
-                }
-            } catch (error) {
-                addToLog(`Network or server error: ${error}`);
-                stopBtn.classList.add('hidden');
-            }
-        }
-
-        async function checkStatus() {
-            try {
-                const response = await fetch('/status');
-                const data = await response.json();
-                if (data.status === 'capturing') {
-                    statusCurrent.textContent = data.message;
-                    setTimeout(checkStatus, 2000);
-                } else {
-                    statusCurrent.textContent = data.message;
-                    addToLog(`Finished: ${data.message}`);
-                    stopBtn.classList.add('hidden');
-                }
-            } catch (error) {
-                addToLog(`Status check failed: ${error}`);
-                stopBtn.classList.add('hidden');
-            }
-        }
-
-        // --- Event Listeners ---
-        document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('.camera-config-select').forEach(fetchCameraConfig);
-        });
-
-        document.body.addEventListener('change', (event) => {
-            if (event.target.matches('.camera-config-select')) {
-                const configName = event.target.dataset.config;
-                const value = event.target.value;
-                setCameraConfig(configName, value);
-                if (configName === 'shutterspeed') {
-                    handleShutterChange();
-                }
-            }
-        });
-
-        document.getElementById('lights-form').addEventListener('submit', (e) => { e.preventDefault(); submitCapture('lights', { exposure: getExposureValue(), count: document.getElementById('lights-count').value }); });
-        document.getElementById('darks-form').addEventListener('submit', (e) => { e.preventDefault(); submitCapture('darks', { exposure: getExposureValue(), count: document.getElementById('darks-count').value }); });
-        document.getElementById('offsets-form').addEventListener('submit', (e) => { e.preventDefault(); submitCapture('offsets', { count: document.getElementById('offsets-count').value }); });
-        stopBtn.addEventListener('click', async () => { addToLog('Sending stop request...'); try { const r = await fetch('/stop_capture', { method: 'POST' }); addToLog((await r.json()).message); } catch (err) { addToLog(`Error stopping: ${err}`); } stopBtn.classList.add('hidden'); });
-    </script>
-</body>
-</html>
-"""
-
-
-@app.route('/')
-def index():
-    """Serves the main HTML page."""
-    return render_template_string(HTML_TEMPLATE)
+@app.route('/', defaults={'path': 'index.html'})
+@app.route('/<path:path>')
+def index(path):
+    """Serves the static page."""
+    return send_from_directory('static', path)
 
 
 @app.route('/api/config/<config_name>', methods=['GET', 'POST'])
@@ -285,8 +42,15 @@ def api_config(config_name):
     config_path = CONFIG_MAP[config_name]
 
     if request.method == 'GET':
-        cmd = ["gphoto2", f"--get-config={config_path}"]
-        stdout, stderr = run_gphoto_command(cmd)
+        try:
+            commander.execute_command(
+                ["gphoto2", f"--get-config={config_path}"],
+                startup_timeout=10,
+                timeout=20
+            )
+        except BusyError:
+            return jsonify({'error': f'timeout trying to run gphoto2 for {config_name}.'}), 500
+        stdout, stderr, _ = commander.wait_for_outputs(timeout=20)
 
         if stderr and "error" in stderr.lower():
             return jsonify({'error': stderr.strip()}), 500
@@ -311,8 +75,12 @@ def api_config(config_name):
         if value_to_set is None:
             return jsonify({'status': 'error', 'message': 'No value provided'}), 400
 
-        cmd = ["gphoto2", f"--set-config-value={config_path}={value_to_set}"]
-        _, stderr = run_gphoto_command(cmd)
+        commander.execute_command(
+            ["gphoto2", f"--set-config-value={config_path}={value_to_set}"],
+            startup_timeout=10,
+            timeout=20
+        )
+        stdout, stderr, _ = commander.wait_for_outputs(timeout=20)
 
         if stderr and "error" in stderr.lower():
             return jsonify({'status': 'error', 'message': stderr.strip()}), 500
@@ -323,9 +91,6 @@ def api_config(config_name):
 @app.route('/start_capture', methods=['POST'])
 def start_capture():
     """Starts a gphoto2 capture process."""
-    global capture_process
-    if capture_process and capture_process.poll() is None:
-        return jsonify({'status': 'error', 'message': 'A capture is already in progress.'}), 400
 
     data = request.json
     capture_type = data.get('type')
@@ -337,40 +102,35 @@ def start_capture():
     env['LANG'] = 'C.UTF-8'
 
     cmd = ["gphoto2"]
+    timeout = 10
+
+
+    exposure = int(data.get('exposure'))
+    count = int(data.get('count'))
+    if not exposure or not count:
+        return jsonify({'status': 'error', 'message': 'Exposure and count are required.'}), 400
+
+    filename_template = f"{capture_type}_%Y%m%d_%H%M%S.%C"
 
     if capture_type in ['lights', 'darks']:
-        exposure = data.get('exposure')
-        count = data.get('count')
-        if not exposure or not count:
-            return jsonify({'status': 'error', 'message': 'Exposure and count are required.'}), 400
-
-        filename_template = f"{capture_type}_%Y%m%d_%H%M%S_%C.arw"
-        cmd.extend([
-            "-I", str(exposure), "-F", str(count), "-B", str(exposure),
-            "--capture-image-and-download", "--no-keep",
-            "--filename", os.path.join(capture_dir, filename_template)
-        ])
-
+        cmd.extend(["-B", str(exposure)])
+        timeout = (exposure + 2) * count + 10
     elif capture_type == 'offsets':
-        count = data.get('count')
-        if not count:
-            return jsonify({'status': 'error', 'message': 'Count is required.'}), 400
-
-        filename_template = f"offsets_%Y%m%d_%H%M%S_%C.arw"
-        cmd.extend([
-            # For offsets, we assume the fastest shutter speed has been set via UI.
-            # Interval of -1 means as fast as possible.
-            "-F", str(count), "-I", "-1",
-            "--capture-image-and-download", "--no-keep",
-            "--filename", os.path.join(capture_dir, filename_template)
-        ])
+        exposure = 1
+        timeout = 5*count + 10  # Assume 5secs per download + 10 sec startup
     else:
         return jsonify({'status': 'error', 'message': 'Invalid capture type.'}), 400
+    cmd.extend([
+        "-I", str(exposure+1), "-F", str(count),
+        "--capture-image-and-download", "--no-keep",
+        "--filename", os.path.join(capture_dir, filename_template)
+    ])
 
     try:
-        capture_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                           preexec_fn=os.setsid, env=env)
+        commander.execute_command(cmd,timeout=timeout, startup_timeout=10)
         return jsonify({'status': 'started', 'message': f'Started {capture_type} capture. Command: {" ".join(cmd)}'})
+    except BusyError:
+        return jsonify({'status': 'error', 'message': 'A capture is already in progress.'}), 400
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'Failed to start gphoto2: {e}'}), 500
 
@@ -378,17 +138,16 @@ def start_capture():
 @app.route('/status')
 def status():
     """Checks the status of the ongoing capture process."""
-    global capture_process
-    if capture_process and capture_process.poll() is None:
+    if commander.is_command_running():
         return jsonify({'status': 'capturing', 'message': 'Capture in progress...'})
     else:
-        if capture_process:
-            stdout, stderr = capture_process.communicate()
-            if capture_process.returncode == 0:
+        _, stderr, last_return_code = commander.get_last_outputs()
+        if last_return_code is not None:
+            if last_return_code == 0:
                 message = "Capture completed successfully."
             else:
                 message = f"Capture failed. Error: {stderr.strip()}"
-            capture_process = None
+            # commander.reset()
             return jsonify({'status': 'finished', 'message': message})
         return jsonify({'status': 'idle', 'message': 'No capture in progress.'})
 
@@ -396,11 +155,9 @@ def status():
 @app.route('/stop_capture', methods=['POST'])
 def stop_capture():
     """Stops the currently running gphoto2 process."""
-    global capture_process
-    if capture_process and capture_process.poll() is None:
+    if commander.is_command_running():
         try:
-            os.killpg(os.getpgid(capture_process.pid), signal.SIGTERM)
-            capture_process = None
+            commander.abort()
             return jsonify({'status': 'stopped', 'message': 'Capture process terminated.'})
         except Exception as e:
             return jsonify({'status': 'error', 'message': f'Failed to stop process: {e}'}), 500
