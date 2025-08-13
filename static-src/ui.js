@@ -3,6 +3,7 @@ const statusCurrent = document.getElementById('status-current');
 const stopBtn = document.getElementById('stop-btn');
 const bulbContainer = document.getElementById('bulb-input-container');
 const bulbInput = document.getElementById('bulb-duration');
+const systemActions = document.getElementById('system-actions');
 
 function addToLog(message) {
     const p = document.createElement('p');
@@ -126,9 +127,52 @@ async function checkStatus() {
     }
 }
 
+async function fetchSystemManagement() {
+    addToLog(`Fetching system options ...`);
+    try {
+        const response = await fetch(`/api/system`);
+        const data = await response.json();
+        if (data.error) {
+            addToLog(`Error for ${configName}: ${data.error}`);
+            systemActions.innerHTML = `<option>${data.error}</option>`;
+            return;
+        }
+
+        systemActions.innerHTML = ''; // Clear loading message
+        data.choices.forEach(choice => {
+            const action = document.createElement('button');
+            action.id = `${choice}-btn`;
+            action.innerHTML = choice;
+            action.textContent = choice;
+            action.className = "w-full mt-4 btn-danger text-white font-bold py-2 px-4 rounded"
+            action.addEventListener(
+                'click', async () => {
+                    addToLog(`Sending ${choice} request...`);
+                    try {
+                        const r = await fetch(`/api/system`,{
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ action: choice })
+                            });
+                        addToLog((await r.json()).message);
+                    } catch (err) {
+                        addToLog(`Error stopping: ${err}`);
+                    }
+                }
+            );
+            systemActions.appendChild(action);
+        });
+
+    } catch (error) {
+        addToLog(`Failed to fetch system actions: ${error}`);
+        systemActions.innerHTML = `<option>Error loading</option>`;
+    }
+}
+
 // --- Event Listeners ---
 document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('.camera-config-select').forEach(fetchCameraConfig);
+    fetchSystemManagement();
 });
 
 document.body.addEventListener('change', (event) => {
@@ -182,4 +226,15 @@ document.getElementById('offsets-form').addEventListener(
             );
         }
     );
-stopBtn.addEventListener('click', async () => { addToLog('Sending stop request...'); try { const r = await fetch('/stop_capture', { method: 'POST' }); addToLog((await r.json()).message); } catch (err) { addToLog(`Error stopping: ${err}`); } stopBtn.classList.add('hidden'); });
+stopBtn.addEventListener(
+    'click', async () => {
+        addToLog('Sending stop request...');
+        try {
+            const r = await fetch('/stop_capture', { method: 'POST' });
+            addToLog((await r.json()).message);
+        } catch (err) {
+            addToLog(`Error stopping: ${err}`);
+        }
+        stopBtn.classList.add('hidden');
+    }
+);

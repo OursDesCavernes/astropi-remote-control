@@ -1,13 +1,10 @@
-import time
-
-from flask import Flask, render_template_string, request, jsonify, send_from_directory
-import subprocess
 import os
-import signal
-import re
+
+from flask import Flask, request, jsonify, send_from_directory
 
 from camera_manager import CameraManager, CameraUnknownSettingError, CameraReadError, CameraWriteError
 from commander import Commander, BusyError
+from system_manager import SystemManager
 
 app = Flask(
     __name__,
@@ -18,6 +15,7 @@ app = Flask(
 # --- Global variable to hold the process ---
 commander = Commander()
 camera = CameraManager(commander=commander)
+system_manager = SystemManager()
 
 @app.route('/', defaults={'path': 'index.html'})
 @app.route('/<path:path>')
@@ -25,11 +23,27 @@ def index(path):
     """Serves the static page."""
     return send_from_directory('static', path)
 
+@app.route("/api/system", methods=['GET', 'POST'])
+def system():
+    try:
+        if request.method == 'GET':
+            return jsonify({'choices': ["reload",] + system_manager.supported_commands})
 
-@app.route("/api/reload-camera", methods=['GET', 'POST'])
-def reload_camera():
-    """Reload camera settings"""
-    camera.reload_camera()
+        elif request.method == 'POST':
+            data = request.get_json()
+            action = data['action']
+            if action == "reload":
+                camera.reload_camera()
+                return jsonify({'status': 'success', 'message': f'camera is reloaded'})
+            if action in system_manager.supported_commands:
+                system_manager.run_command(action)
+                return jsonify({'status': 'success', 'message': f'command {action} was executed'})
+            else:
+                return jsonify({'status': 'error', 'message': 'invalid action'}), 400
+        else:
+            return jsonify({'status': 'error', 'message': 'invalid method'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f"unknown error: {e}"}), 500
 
 @app.route('/api/config/<config_name>', methods=['GET', 'POST'])
 def api_config(config_name):
@@ -66,12 +80,9 @@ def start_capture():
     data = request.json
     capture_type = data.get('type')
 
-    capture_dir = os.path.join(os.path.expanduser("~"), "astro_captures", capture_type)
+    capture_dir = os.path.join(os.path.expanduser("~"), "Documents/astro_captures", capture_type)
     os.makedirs(capture_dir, exist_ok=True)
-
     cmd = ["gphoto2"]
-    timeout = 10
-
 
     count = int(data.get('count'))
 
