@@ -44,19 +44,20 @@ def api_config(config_name):
             value_to_set = data.get('value')
             camera.apply_setting(setting=config_name, value=value_to_set)
             if value_to_set is None:
-                return jsonify({'status': 'error', 'message': 'No value provided'}), 400
+                return jsonify({'status': 'error', 'message': 'no value provided'}), 400
             return jsonify({'status': 'success', 'message': f'{config_name} set to {value_to_set}'})
+        return jsonify({'status': 'error', 'message': 'unsupported method'}), 400
 
     except CameraUnknownSettingError:
-        return jsonify({'error': f'Unknown config name: {config_name}'}), 404
+        return jsonify({'status': 'error', 'message': f'unknown config name: {config_name}'}), 404
     except CameraReadError as e:
-        return jsonify({'error': f'Could not parse choices for {config_name}: {e}'}), 500
+        return jsonify({'status': 'error', 'message': f'could not parse choices for {config_name}: {e}'}), 500
     except CameraWriteError as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
     except BusyError:
-        return jsonify({'error': f'timeout trying to run gphoto2 for {config_name}.'}), 500
+        return jsonify({'status': 'error', 'message': f'CMD busy trying to run gphoto2 for {config_name}.'}), 500
     except Exception as e:
-        return jsonify({'error': f"unknown error: {e}"}), 500
+        return jsonify({'status': 'error', 'message': f"unknown error: {e}"}), 500
 
 @app.route('/start_capture', methods=['POST'])
 def start_capture():
@@ -129,4 +130,4 @@ def stop_capture():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
