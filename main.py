@@ -87,8 +87,8 @@ def start_capture():
     count = int(data.get('count'))
 
     filename_template = f"{capture_type}_%Y%m%d_%H%M%S.%C"
-    exposure = int(camera.read_setting("shutterspeed")[0])
     if capture_type in ['lights', 'darks']:
+        exposure = int(camera.read_setting("shutter-speed")[0])
         cmd.extend(["-B", str(exposure)])
         timeout = (exposure + 2) * count + 10
     elif capture_type == 'offsets':
@@ -97,7 +97,7 @@ def start_capture():
     else:
         return jsonify({'status': 'error', 'message': 'Invalid capture type.'}), 400
     cmd.extend([
-        "-I", str(exposure+1), "-F", str(count),
+        "-I", str(exposure+3), "-F", str(count),
         "--capture-image-and-download", "--no-keep",
         "--filename", os.path.join(capture_dir, filename_template)
     ])
